@@ -1,13 +1,19 @@
+midiparser.py
+Today
+Fri 4:27 AM
+
+You uploaded an item
+Text
+midiparser.py
 from ast import literal_eval
 from copy import deepcopy
+from itertools import groupby
 from mido import Message, MidiFile, MidiTrack
 from os import listdir
-from util import showprogress
 import csv
 import numpy as np
 import tensorflow as tf
-
-# tf.enable_eager_execution()
+import util
 
 FILE_EXTENSION = '.dimp' # Digital Music Representation
 NOTES_RANGE = 128 # a.k.a the width of one frame
@@ -18,24 +24,24 @@ INSTRUMENT_TRACK = 'instrument'
 
 class MidiData():
     # *********PUBLIC/IMPORTANT METHODS************
-    def __init__(self, tracks_info_file, open_files=None, open_from_folder=None, smoothing=1, transpose=[0]):
+    def __init__(self, tracks_info_file, open_files=None, open_from_folder=None, smoothing=1,
+            transpose=[0], group_frames=False):
         """
         Creates an instance of MidiData. This is called automatically when you call 'MidiData()',
         see example usage below.
-        Arguments:
-            * tracks_info: the path to the location of the cvs file containing information about the
+        @param tracks_info: the path to the location of the cvs file containing information about the
                 midi files
-            * open_files (recommanded): a list of the files to open in this MidiData object
-            * open_from_folder: use this argument if you want to open all midi files inside of
+        @param open_files (recommanded): a list of the files to open in this MidiData object
+        @param open_from_folder: use this argument if you want to open all midi files inside of
                 a specific folder without listing them all.
                 NOTE: Only one of 'open_files' or 'open_from_folder' must be used.
-            * smoothing (optional): an integer greater or equal to 1. It determines how much
+        @param smoothing (optional): an integer greater or equal to 1. It determines how much
                 granularity we want the frames to have. A smoothing of 1 will have the frames as
                 granular as they can be (96 frames per beat). A greater smoothing value means less
                 granularity (useful for only retaining the most important note/chord changes and
                 ignoring the potential small variations, especially when there are many such small
                 variations).
-            * transpose (optional): an array of at least one integer. This will decide if we want to
+        @param transpose (optional): an array of at least one integer. This will decide if we want to
                 transpose the midi data. If this argument is used, it should usually take a value
                 like this [-4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7]. With an argument like this one,
                 the returned data would contain, in addition to the original data in the midi file,
@@ -53,31 +59,83 @@ class MidiData():
         self.__transpose__ = transpose
         self.__read_tracks_info_file__(tracks_info_file)
         self.__smoothing__ = smoothing
+        self.__group_frames__ = group_frames #TODO(ndombe): description for group_frames argument
         if open_from_folder: self.__open_from_folder__(open_from_folder)
         elif open_files: self.__open_files__(open_files)
         self.__smooth_frames__()
         print('Extracting vocabulary...')
-        frames2set = lambda x: str(tuple(x))
-        mel_as_tuple = np.apply_along_axis(frames2set, 1, self.__songs__[0]).tolist()
-        instr_as_tuple = np.apply_along_axis(frames2set, 1, self.__songs__[1]).tolist()
-        mel_vocab = list(set(mel_as_tuple))
-        instr_vocab = list(set(instr_as_tuple))
-        self.__vocab__ = (mel_vocab, instr_vocab)
-        print('Vocabularty size (melody: {}, instr: {})'.format(len(mel_vocab), len(instr_vocab)))
-        print('Generating frame-to-int maps...')
-        mel2idx = {frame:i for i,frame in enumerate(mel_vocab)}
-        instr2idx = {frame:i for i,frame in enumerate(instr_vocab)}
-        self.__mel_as_int__ = list(map(lambda x: mel2idx[x], mel_as_tuple))
-        self.__instr_as_int__ = list(map(lambda x: instr2idx[x], instr_as_tuple))
+        frame2str = lambda x: str(tuple(x))
+        mel_as_str = np.apply_along_axis(frame2str, 1, self.__songs__[0]).tolist()
+        instr_as_str = np.apply_along_axis(frame2str, 1, self.__songs__[1]).tolist()
+        # mel_vocab = list(set(mel_as_str))
+        # instr_vocab = list(set(instr_as_str))
+        if self.__group_frames__:
+            group_func =\
+                lambda frames: [str((key, sum(1 for i in group))) for key, group in groupby(frames)]
+            grouped_mel_as_str, grouped_instr_as_str =\
+                group_func(mel_as_str), group_func(instr_as_str)
+            grouped_mel_vocab, self.__grouped_mel_as_int__ =\
+                np.unique(grouped_mel_as_str, return_inverse=True)
+            grouped_instr_vocab, self.__grouped_instr_as_int__=\
+                np.unique(grouped_instr_as_str, return_inverse=True)
+            # print(grouped_mel_as_str[0])
+            # print(grouped_mel_vocab[0])
+            # assert smoothing == -2
+            self.__grouped_vocab__ = (grouped_mel_vocab, grouped_instr_vocab)
+            print('Vocabularty size (melody: {}, instr: {})'\
+                .format(len(grouped_mel_vocab), len(grouped_instr_vocab)))
+        else:
+            mel_vocab, self.__mel_as_int__ = np.unique(mel_as_str, return_inverse=True)
+            instr_vocab, self.__instr_as_int__ = np.unique(instr_as_str, return_inverse=True)
+            self.__vocab__ = (mel_vocab, instr_vocab)
+            print('Vocabularty size (melody: {}, instr: {})'\
+                .format(len(mel_vocab), len(instr_vocab)))
+
+        # print('Generating frame-to-int maps...')
+        # mel2idx = {frame:i for i,frame in enumerate(mel_vocab)}
+        # instr2idx = {frame:i for i,frame in enumerate(instr_vocab)}
+        # self.__mel_as_int__ = list(map(lambda x: mel2idx[x], mel_as_str))
+        # self.__instr_as_int__ = list(map(lambda x: instr2idx[x], instr_as_str))
         print('MidiData object ready!')
 
-        # data = self.get_instr_batched_dataset(sequence_length=96, batch_size=2)
-        # # print(type(data))
-        # for i,d in enumerate(data):
-        #     # print(d)
-        #     if i == 0: print(d)
-        #     __Track__.toFile(self.instr_idx_to_frames(d[0].numpy()[1]), file=f'generated{i}.mid', smoothing=self.__smoothing__)
-        #     if i == 9: break
+
+    def chopin(self, labels, logits, softmax_idx):
+        """
+        TODO:documentation
+        Assumption: this is only used to compute the chopin score of the instrumentatl!
+        """
+        labels = labels.astype(int)
+        # print('pre logits',logits, logits.shape)
+        # logits = np.argmax(logits, axis=-1).astype(int)
+        logits = logits.astype(int)
+        # print('labels:',labels)
+        # print('logits:',logits)
+        # print(list(self.instr_idx_to_frames([0])))
+        score = 0
+        for i in range(logits.shape[-1]):
+            logits_k = logits[:,:,i]
+            # print('in loop logits', logits_k, logits_k.shape)
+            if self.__group_frames__:
+                get_frames = lambda x: literal_eval(self.grouped_instr_idx_to_frames(x)[0])
+                score += util.chopin(np.apply_along_axis(get_frames, -1, labels),
+                            np.apply_along_axis(get_frames, -1, logits_k),
+                            softmax_idx[:,:,i])
+            else:
+                get_frames = lambda x: self.instr_idx_to_frames(x)
+                # def get_frames(x):
+                #     # print(x)
+                #     return self.instr_idx_to_frames(x)
+                # print("in here", i)
+                score += util.chopin(np.apply_along_axis(get_frames, -1, labels),
+                            np.apply_along_axis(get_frames, -1, logits_k),
+                            softmax_idx[:,:,i])
+                # print("still in here", i)
+        
+        # print("it's a yes")
+        score /= logits.shape[-1]
+        # print("score is",score)
+        return score
+
 
     def get_vocabs(self):
         """
@@ -107,7 +165,8 @@ class MidiData():
             [1,1,1,1]
         ]
         """
-        return self.__vocab__[0], self.__vocab__[1]
+        vocab = self.__grouped_vocab__ if self.__group_frames__ else self.__vocab__
+        return vocab[0], vocab[1]
 
     def get_vocabs_sizes(self):
         """
@@ -126,7 +185,8 @@ class MidiData():
         mel_vocab_size = len(mel_vocab)
         instr_vocab_size = len(instr_vocab)
         """
-        return len(self.__vocab__[0]), len(self.__vocab__[1])
+        vocab = self.__grouped_vocab__ if self.__group_frames__ else self.__vocab__
+        return len(vocab[0]), len(vocab[1])
 
     def get_frames_as_int(self):
         """
@@ -138,8 +198,8 @@ class MidiData():
         data = MidiData(...)
         mel_as_int, instr_as_int = data.get_frames_as_int()
         """
-
-        return self.__mel_as_int__, self.__instr_as_int__
+        return (self.__grouped_mel_as_int__, self.__grouped_instr_as_int__) \
+             if self.__group_frames__ else (self.__mel_as_int__, self.__instr_as_int__)
 
     def get_instr_batched_dataset(self, sequence_length=(384*2), batch_size=128, buffer_size=10000):
         """
@@ -153,15 +213,21 @@ class MidiData():
         data = MidiData('path_to_tracks_info.csv', open_files=['file1.mid', 'file2.mid'])
         instr_dataset = data.get_instr_batched_dataset(sequence_length=500, batch_size=256)
         """
-        instr_seq = tf.data.Dataset.from_tensor_slices(self.__instr_as_int__).batch(sequence_length+1, drop_remainder=True)
+
+        instr_seq = tf.data.Dataset.from_tensor_slices(
+            self.__grouped_instr_as_int__ if self.__group_frames__ else self.__instr_as_int__)\
+            .batch(sequence_length+1, drop_remainder=True)
 
         split_input_target = lambda x: (x[:-1], x[1:])
 
-        instr_dataset = instr_seq.map(split_input_target).shuffle(buffer_size).batch(batch_size, drop_remainder=True)
+        instr_dataset =\
+            instr_seq.map(split_input_target).shuffle(buffer_size)\
+                .batch(batch_size, drop_remainder=True)
         return instr_dataset
 
 
-    def get_mel_to_instr_batched_dataset(self, sequence_length=(384*2), batch_size=128, buffer_size=10000):
+    def get_mel_to_instr_batched_dataset(self, sequence_length=(384*2), batch_size=128,
+            buffer_size=10000):
         """
         Get the original frames expressed as their respective integer index according to the
         unique frames vocabulary. Note that this returns 2 arrays, the first one containing the
@@ -171,15 +237,21 @@ class MidiData():
         Example Usage:
         # Assuming you declared a MidiData object like so
         data = MidiData('path_to_tracks_info.csv', open_files=['file1.mid', 'file2.mid'])
-        mel_to_instr_dataset = data.get_mel_to_instr_batched_dataset(sequence_length=500, batch_size=256)
+        mel_to_instr_dataset =
+            data.get_mel_to_instr_batched_dataset(sequence_length=500, batch_size=256)
         """
-        mel_seq = tf.data.Dataset.from_tensor_slices(self.__mel_as_int__).batch(sequence_length+1, drop_remainder=True)
-        instr_seq = tf.data.Dataset.from_tensor_slices(self.__instr_as_int__).batch(sequence_length+1, drop_remainder=True)
+        mel_seq = tf.data.Dataset.from_tensor_slices(
+            self.__grouped_mel_as_int__ if self.__group_frames__ else self.__mel_as_int__)\
+            .batch(sequence_length+1, drop_remainder=True)
+        instr_seq = tf.data.Dataset.from_tensor_slices(
+            self.__grouped_instr_as_int__ if self.__group_frames__ else self.__instr_as_int__)\
+            .batch(sequence_length+1, drop_remainder=True)
 
         mel_dataset = mel_seq.map(lambda x: x[:-1])
         instr_dataset = instr_seq.map(lambda x: x[1:])
 
-        dataset = tf.data.Dataset.zip((mel_dataset, instr_dataset)).shuffle(buffer_size).batch(batch_size, drop_remainder=True)
+        dataset = tf.data.Dataset.zip((mel_dataset, instr_dataset)).shuffle(buffer_size)\
+            .batch(batch_size, drop_remainder=True)
 
         return dataset
 
@@ -203,8 +275,11 @@ class MidiData():
         """
 
         midi_file = self.__force_midi_extension__(midi_file)
-        frames = self.instr_idx_to_frames(output)
-        __Track__.toFile(frames, file=midi_file, smoothing=self.__smoothing__)    
+        frames = self.grouped_instr_idx_to_frames(output) if self.__group_frames__ \
+                    else self.instr_idx_to_frames(output)# if not raw else output
+        # print(self.__grouped_vocab__[0][0])
+        __Track__.toFile(
+            frames, file=midi_file, smoothing=self.__smoothing__,grouped=self.__group_frames__)    
 
     def mel_idx_to_frames(self, idx_array):
         """
@@ -222,6 +297,12 @@ class MidiData():
         """
 
         map_idx_to_frames = lambda x: np.array(literal_eval(self.__vocab__[0][x]))
+        return list(map(map_idx_to_frames, idx_array))
+
+    def grouped_mel_idx_to_frames(self, idx_array):
+        #TODO: documentation
+
+        map_idx_to_frames = lambda x: literal_eval(self.__grouped_vocab__[0][x])
         return list(map(map_idx_to_frames, idx_array))
 
     
@@ -242,6 +323,17 @@ class MidiData():
 
         # print(idx_array)
         map_idx_to_frames = lambda x: np.array(literal_eval(self.__vocab__[1][x]))
+        # def map_idx_to_frames(x):
+        #     print(x)
+        #     return np.array(literal_eval(self.__vocab__[1][x]))
+        return list(map(map_idx_to_frames, idx_array))
+
+    def grouped_instr_idx_to_frames(self, idx_array):
+        # TODO: documentation
+
+        # TODO(ndombe): this is kinda messy, you're leaving the tuple as a string (not using
+        # literal_eval) and hoping to do that in the #toFile() method. There should be a better way.
+        map_idx_to_frames = lambda x: literal_eval(self.__grouped_vocab__[1][x])
         return list(map(map_idx_to_frames, idx_array))
 
 
@@ -305,13 +397,15 @@ class MidiData():
             nbr_transposes = len(self.__transpose__)
             for t_index, transpose in enumerate(self.__transpose__):
                 melody_frames = song.instruments[info[MELODY_TRACK]].transpose_frames(transpose)
-                instrumental_frames = song.instruments[info[INSTRUMENT_TRACK]].transpose_frames(transpose)
+                instrumental_frames =\
+                    song.instruments[info[INSTRUMENT_TRACK]].transpose_frames(transpose)
                 count_frames += len(melody_frames) + len(instrumental_frames)
                 new_song_frames = [melody_frames, instrumental_frames]
                 if type(self.__songs__) == type(None): self.__songs__ = np.asarray(new_song_frames)
                 else: self.__songs__ = np.concatenate((self.__songs__, new_song_frames), axis=1)
-                showprogress((t_index+1)/(nbr_transposes*len(midi_paths)) + (index)/len(midi_paths), message=progress_msg, sub=True)
-            showprogress((index+1)/len(midi_paths), message=progress_msg)
+                util.showprogress((t_index+1)/(nbr_transposes*len(midi_paths)) + (index)/len(midi_paths),
+                    message=progress_msg, sub=True)
+            util.showprogress((index+1)/len(midi_paths), message=progress_msg)
         self.__songs__ = np.asarray(self.__songs__)
         # print(self.__songs__)
         # print(self.__songs__.shape)
@@ -360,7 +454,8 @@ class __Track__():
 
 
     @staticmethod
-    def toFile(frames, file='', smoothing=1):
+    def toFile(frames, file='', smoothing=1, grouped=False):
+        # time_increase = 5
         midi_file = MidiFile()
         track = MidiTrack()
         midi_file.tracks.append(track)
@@ -370,18 +465,27 @@ class __Track__():
         delta_time = 0
         print(f'Exporting frames to file {file}...')
         for i,frame in enumerate(frames):
+            time_increase = 5
             # frame = frame.tolist()
             # print(current_frame, type(current_frame))
             # print(frame, type(frame))
             # for repeat in range(smoothing):
+            if grouped:
+                # print(type(frame))
+                # print(frame)
+                frame,factor = frame
+                frame = np.array(literal_eval(frame))
+                # print(factor, time_increase)
+                time_increase *= factor
             idx = np.nonzero(current_frame - frame)
-            delta_time += 5*smoothing
+            # delta_time += time_increase*smoothing
             for note in idx[0]:
                 msg = 'note_on' if frame[note] > 0 else 'note_off'
                 track.append(Message(msg, note=note, velocity=70, time=delta_time))
                 delta_time = 0
+            delta_time += time_increase*smoothing
             current_frame = frame
-            showprogress((i+1)/len(frames))
+            util.showprogress((i+1)/len(frames))
         print('Export successful!')
         midi_file.save(file)
 
@@ -502,5 +606,22 @@ class __Song__():
 
 
 if __name__ == '__main__':
-    data = MidiData('midis/tracks.csv', open_files=['midis/white christmas.mid'], smoothing=32)
-    print(data.get_vocabs_sizes())
+    debug = True
+
+    if debug: tf.enable_eager_execution()
+
+    mididata = MidiData('midis/tracks.csv', open_files=['midis/white christmas.mid'],
+        smoothing=16, group_frames=True)
+    
+    # ---Debugging---
+    if debug:
+        data = mididata.get_instr_batched_dataset(sequence_length=96*2, batch_size=1)
+        # print(type(data))
+        for i,d in enumerate(data):
+            # print(d)
+            # if i == 0: print(d)
+            mididata.export_model_output_to_midi(d[0].numpy()[0], midi_file=f'generated{i}.mid')
+            # __Track__.toFile(self.instr_idx_to_frames(d[0].numpy()[1]),
+            #    file=f'generated{i}.mid', smoothing=self.__smoothing__)
+            if i == 9: break
+    # print(data.get_vocabs_sizes())
