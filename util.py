@@ -1,7 +1,5 @@
-# from tensorflow.keras.metrics import Mean
 from sys import stdout
 import numpy as np
-import copy
 
 def showprogress(percentage, message='', sub=False):
     """

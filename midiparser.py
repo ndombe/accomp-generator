@@ -18,12 +18,12 @@ INSTRUMENT_TRACK = 'instrument'
 class MidiData():
     # *********PUBLIC/IMPORTANT METHODS************
     def __init__(self, tracks_info_file, open_files=None, open_from_folder=None, smoothing=1,
-            transpose=[0]):
+            transpose=[0], new_melody_file=None):
         """
         Creates an instance of MidiData. This is called automatically when you call 'MidiData()',
         see example usage below.
-        @param tracks_info: the path to the location of the cvs file containing information about the
-                midi files
+        @param tracks_info: the path to the location of the cvs file containing information about
+                the midi files
         @param open_files (recommanded): a list of the files to open in this MidiData object
         @param open_from_folder: use this argument if you want to open all midi files inside of
                 a specific folder without listing them all.
@@ -34,8 +34,8 @@ class MidiData():
                 granularity (useful for only retaining the most important note/chord changes and
                 ignoring the potential small variations, especially when there are many such small
                 variations).
-        @param transpose (optional): an array of at least one integer. This will decide if we want to
-                transpose the midi data. If this argument is used, it should usually take a value
+        @param transpose (optional): an array of at least one integer. This will decide if we want
+                to transpose the midi data. If this argument is used, it should usually take a value
                 like this [-4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7]. With an argument like this one,
                 the returned data would contain, in addition to the original data in the midi file,
                 4 copies of the same data transposed respectively 4, 3, 2 and 1 times downward, then
@@ -52,16 +52,46 @@ class MidiData():
         self.__transpose__ = transpose
         self.__read_tracks_info_file__(tracks_info_file)
         self.__smoothing__ = smoothing
+        self.__new_melody_file__ = new_melody_file
         if open_from_folder: self.__open_from_folder__(open_from_folder)
         elif open_files: self.__open_files__(open_files)
         self.__smooth_frames__()
         print('Extracting vocabulary...')
+        self.__reduced_new_melody__ = None if self.__new_melody_file__ == None else\
+                self.extract_notes_only(self.__new_melody__)
         frame2str = lambda x: str(tuple(x))
-        mel_as_str = np.apply_along_axis(frame2str, 1, self.__songs__[0]).tolist()
+        all_melodies = self.__songs__[0] if self.__new_melody_file__ == None else\
+                np.concatenate((self.__songs__[0], self.__new_melody__))
+        mel_as_str = np.apply_along_axis(frame2str, 1, all_melodies).tolist()
         instr_as_str = np.apply_along_axis(frame2str, 1, self.__songs__[1]).tolist()
+        reduced_mel_as_str = np.apply_along_axis(
+            frame2str, 1, self.extract_notes_only(all_melodies)).tolist()
+        reduced_instr_as_str = np.apply_along_axis(
+            frame2str, 1, self.extract_notes_only(self.__songs__[1], with_root=True)).tolist()
+
         mel_vocab, self.__mel_as_int__ = np.unique(mel_as_str, return_inverse=True)
+        reduced_mel_vocab, self.__reduced_mel_as_int__ = np.unique(
+            reduced_mel_as_str, return_inverse=True)
         instr_vocab, self.__instr_as_int__ = np.unique(instr_as_str, return_inverse=True)
+        reduced_instr_vocab, self.__reduced_instr_as_int__ = np.unique(
+            reduced_instr_as_str, return_inverse=True)
+        # Remove the melody input from the data that'll be used for training
+        # print('before')
+        # print(len(self.__mel_as_int__))
+        # print(len(self.__reduced_mel_as_int__))
+        if not self.__new_melody_file__ == None:
+            self.__new_mel_as_int__ = self.__mel_as_int__[-len(self.__new_melody__):]
+            self.__mel_as_int__ = self.__mel_as_int__[:-len(self.__new_melody__)]
+            self.__reduced_new_mel_as_int__ =\
+                self.__reduced_mel_as_int__[-len(self.__new_melody__):]
+            self.__reduced_mel_as_int__ = self.__reduced_mel_as_int__[:-len(self.__new_melody__)]
+            
+        # print('after')
+        # print(len(self.__new_melody__))
+        # print(len(self.__new_mel_as_int__))
+        # print(len(self.__reduced_new_mel_as_int__))
         self.__vocab__ = (mel_vocab, instr_vocab)
+        self.__reduced_vocab__ = (reduced_mel_vocab, reduced_instr_vocab)
         print('Extracted vocabulary as int.')
         print('Extracting vocabulary as frames...')
         self.__np_mel_vocab__ = self.mel_idx_to_frames(np.arange(len(mel_vocab)))
@@ -75,8 +105,9 @@ class MidiData():
             np.apply_along_axis(
                 lambda x: len(np.nonzero(x)) if len(np.nonzero(x)) > 0 else 1,
                 -1, self.__np_instr_vocab__)
-        print('Vocabularty size (melody: {}, instr: {})'\
-            .format(len(mel_vocab), len(instr_vocab)))
+        print('Vocabularty size (melody: {}, reduced-melody: {}, instr: {}, reduced-instr: {})'\
+            .format(
+                len(mel_vocab), len(reduced_mel_vocab), len(instr_vocab), len(reduced_instr_vocab)))
 
         print('MidiData object ready!')
 
@@ -129,22 +160,43 @@ class MidiData():
         return score
 
     def probs_to_frames(self, probs, k=1, threshold=.6):
+        """
+        Retreive a frame from the vocabulary that is the most probable match given the provided
+        notes probabilities argument.
+        NOTE: This method is assumed to be used for the instrumental, implying that there is an
+                implicit call to the instrumental vocabulary.
+        
+        @param probs: an nd-array. The last dimension is the length of frame (# notes in a frame).
+                Each element of this last dimension represent the probability of the corresponding
+                note to be played in that frame.
+        @param k(optional): an integer greater or equal to 1 representing how many of the top
+                likely frames we consider when picking the output frame.
+        @param threshold(optional): a float number from 0 to 1 determining where to cut the
+                probabilities, i.e. every probability below `threshold` will be set to 0 and will
+                not be taken into account when looking for the most probable frame. Default 0.6
+        """
         self.__probs_to_frames_k = k
         self.__probs_to_frames_threshold = threshold
         frames = np.apply_along_axis(self.__probs_to_k_frame__, -1, probs)
         idx = self.get_frame_index(frames)
-        # print(idx)
-        # print(idx[0][0]+1)
-        # print(self.__np_instr_vocab__[idx[0][0]])
-        # print(frames)
         return frames
 
     def get_frame_index(self, frame):
+        """
+        Get the index of the given frame from the vocabulary.
+        NOTE: This is assumed to be used for the instrumental, implying that we're fetching from the
+                instrumental vocabulary.
+        @param frame: a one dimensional list/array of the length of a frame legnth representing a
+                frame.
+        @return an integer representing the index of the frame in the vocabulary.
+        """
         return np.where(self.__vocab__[1]==str(tuple(frame)))
 
     def compute_vocab_chopin_distribution(self, ref_frame, from_frame=False):
-        # TODO: documentation
-        # Assumption: this is used to fetch frames from the instrumental vocabulary only.
+        """
+        TODO: complete documentation
+        NOTE (Assumption): this is used to fetch frames from the instrumental vocabulary only.
+        """
         if not from_frame:
             # `ref` is an integer representing the index of the desired reference frame
             # TODO: check for integer/float type
@@ -157,11 +209,13 @@ class MidiData():
         scores = util.chopin(references, candidates)
         return scores
 
-    def get_vocabs(self):
+    def get_vocabs(self, reduced=False):
         """
         Get the unique frames from the loaded data, aka the vocabulary. Note that this returns 2
         sets of frames, the first one corresponding to the melody and the second one to the
         instrumental.
+
+        TODO(ndombe): update documentation with 'reduced'
 
         Example Usage:
         # Assuming you declared a MidiData object like so
@@ -185,14 +239,16 @@ class MidiData():
             [1,1,1,1]
         ]
         """
-        vocab = self.__vocab__
+        vocab = self.__vocab__ if not reduced else self.__reduced_vocab__
         return vocab[0], vocab[1]
 
-    def get_vocabs_sizes(self):
+    def get_vocabs_sizes(self, reduced=False):
         """
         Get the number of unique frames, aka the size of the vocabulary. Note that this returns 2
         sizes, the first one corresponding to the size of unique frames in the melody, and the
         second one corresponding to the size of frames in the instrumental.
+
+        TODO(ndombe): update documentation with 'reduced'
 
         Example Usage:
         # Assuming you declared a MidiData object like so
@@ -205,28 +261,39 @@ class MidiData():
         mel_vocab_size = len(mel_vocab)
         instr_vocab_size = len(instr_vocab)
         """
-        vocab = self.__vocab__
+        vocab = self.__vocab__ if not reduced else self.__reduced_vocab__
         return len(vocab[0]), len(vocab[1])
 
-    def get_frames_as_int(self):
+    def get_new_melody_as_int(self, reduced=False):
+        """
+        TODO(ndombe): missing documentation
+        """
+        return self.__new_mel_as_int__ if not reduced else self.__reduced_new_mel_as_int__
+
+    def get_frames_as_int(self, reduced=False):
         """
         Get the original melody and instrumental where each frame is replaced by its integer
         representation according to the vocabulary.
+
+        TODO(ndombe): update documentation with 'reduced'
 
         Example Usage:
         # Assuming you declared a MidiData object
         data = MidiData(...)
         mel_as_int, instr_as_int = data.get_frames_as_int()
         """
-        return (self.__mel_as_int__, self.__instr_as_int__)
+        return (self.__mel_as_int__ if not reduced else self.__reduced_mel_as_int__,
+                self.__instr_as_int__ if not reduced else self.__reduced_instr_as_int__)
 
-    def get_instr_batched_dataset(self, sequence_length=(384*2), batch_size=128, buffer_size=10000,
-            output_frames=False):
+    def get_instr_batched_dataset(self, sequence_length=(96), batch_size=64, buffer_size=10000,
+            output_frames=False, reduced=False, ratio=[.8,.1]):
         """
         Get the original frames expressed as their respective integer index according to the
         unique frames vocabulary. Note that this returns 2 arrays, the first one containing the
         indices corresponding to the frames of the original melody, and the second one containing
         the indices corresponding to the frames of the original instrumental.
+
+        TODO(ndombe): update documentation with 'reduced' and 'ratio'
 
         Example Usage:
         # Assuming you declared a MidiData object like so
@@ -234,10 +301,13 @@ class MidiData():
         instr_dataset = data.get_instr_batched_dataset(sequence_length=500, batch_size=256)
         """
 
-        instr_seq = tf.data.Dataset.from_tensor_slices(self.__instr_as_int__)\
+        instr_seq = tf.data.Dataset.from_tensor_slices(
+            self.__instr_as_int__ if not reduced else self.__reduced_instr_as_int__)\
             .batch(sequence_length+1, drop_remainder=True)
-        instr_seq_as_frames = tf.data.Dataset.from_tensor_slices(self.instr_idx_to_frames(self.__instr_as_int__))\
-            .batch(sequence_length+1, drop_remainder=True)
+        
+        # NOTE: won't bother adding the 'reduced' case here because this case won't be used.
+        instr_seq_as_frames = tf.data.Dataset.from_tensor_slices(self.instr_idx_to_frames(\
+            self.__instr_as_int__)).batch(sequence_length+1, drop_remainder=True)
 
         split_input_target = lambda x: (x[:-1], x[1:])
         input_instr = instr_seq.map(lambda x: x[:-1])
@@ -248,17 +318,19 @@ class MidiData():
                 .batch(batch_size, drop_remainder=True) if not output_frames else\
             tf.data.Dataset.zip((input_instr, output_instr)).shuffle(buffer_size)\
             .batch(batch_size, drop_remainder=True)
-        # print(instr_dataset)
-        return instr_dataset
+        
+        return self.__split_dataset__(instr_dataset, ratio)
 
 
-    def get_mel_to_instr_batched_dataset(self, sequence_length=(384*2), batch_size=128,
-            buffer_size=10000):
+    def get_mel_to_instr_batched_dataset(self, sequence_length=(96), batch_size=64,
+            buffer_size=10000, reduced_mel=False, reduced_instr=False, ratio=[.8,.1]):
         """
         Get the original frames expressed as their respective integer index according to the
         unique frames vocabulary. Note that this returns 2 arrays, the first one containing the
         indices corresponding to the frames of the original melody, and the second one containing
         the indices corresponding to the frames of the original instrumental.
+
+        TODO(ndombe): update documentation with 'reduced_mel' and 'reduced_instr'
 
         Example Usage:
         # Assuming you declared a MidiData object like so
@@ -266,9 +338,11 @@ class MidiData():
         mel_to_instr_dataset =
             data.get_mel_to_instr_batched_dataset(sequence_length=500, batch_size=256)
         """
-        mel_seq = tf.data.Dataset.from_tensor_slices(self.__mel_as_int__)\
+        mel_seq = tf.data.Dataset.from_tensor_slices(
+            self.__mel_as_int__ if not reduced_mel else self.__reduced_mel_as_int__)\
             .batch(sequence_length+1, drop_remainder=True)
-        instr_seq = tf.data.Dataset.from_tensor_slices(self.__instr_as_int__)\
+        instr_seq = tf.data.Dataset.from_tensor_slices(
+            self.__instr_as_int__ if not reduced_instr else self.__reduced_instr_as_int__)\
             .batch(sequence_length+1, drop_remainder=True)
 
         mel_dataset = mel_seq.map(lambda x: x[:-1])
@@ -277,7 +351,7 @@ class MidiData():
         dataset = tf.data.Dataset.zip((mel_dataset, instr_dataset)).shuffle(buffer_size)\
             .batch(batch_size, drop_remainder=True)
 
-        return dataset
+        return self.__split_dataset__(dataset, ratio)
 
 
     def export_model_output_to_midi(self, output, midi_file, from_frames=False):
@@ -341,6 +415,37 @@ class MidiData():
         map_all_idx_to_frames = lambda x: np.array(list(map(map_idx_vector_to_frames, x)))
         return np.apply_along_axis(map_all_idx_to_frames, -1, idx_array)
 
+    def extract_notes_only(self, frames, with_root=False):
+        """
+        Extract from a frame of set of frames the notes information only without caring about the
+        different octaves they were played in. Just the existence or non-existence of the 12 notes.
+        @param frames: nd-array where the last dimension is the size of a frame.
+        @param with_root(optional): a boolean representing whether or not we want to capture the
+                'root note' information. If False, the new frames will only be 12 notes long; if
+                True, the new frames will be 24 notes long, with the first 12 notes reserved for the
+                root note and the remaining 12 for any other existing notes. Default False.
+        @return a new nd-array of a similar shape as the input `frames` except for the last
+                dimension where the length of the frame will be either 12 or 24 depending on whether
+                `with_root` was False or True respectively
+        """
+        def extract(frame):
+            NBR_NOTES = 12
+            notes = np.nonzero(frame)[0]%NBR_NOTES
+            unique_notes = np.unique(notes)
+            new_frame = np.zeros((NBR_NOTES if not with_root else NBR_NOTES*2),dtype='int')
+            if len(notes) == 0: return new_frame
+            if with_root:
+                new_frame[notes[0]] = 1
+                for note in unique_notes:
+                    if note == notes[0]: continue
+                    new_frame[note+NBR_NOTES] = 1
+            else:
+                for note in unique_notes:
+                    new_frame[note] = 1
+            return new_frame
+        new_frames = np.apply_along_axis(extract, -1, frames)
+        return new_frames
+
 
     # ******************END PUBLIC/IMPORTANT METHODS***************************
 
@@ -357,7 +462,8 @@ class MidiData():
         # print(self.__np_instr_vocab__.shape)
         activated = deepcopy(notes_probs)
         activated[activated < threshold] = 0
-        logits = np.sum(activated*self.__np_instr_vocab__, axis=-1)/self.__instr_vocab_nonzero_count__
+        logits =\
+            np.sum(activated*self.__np_instr_vocab__, axis=-1)/self.__instr_vocab_nonzero_count__
         new_probs, idx = tf.math.top_k(logits, k=k)
         frames = tf.gather(self.__np_instr_vocab__, idx)
         id = randint(0, k-1)
@@ -368,6 +474,27 @@ class MidiData():
         # print(frame)
         # print(self.get_frame_index(frame))
         return frame
+
+    def __split_dataset__(self, dataset, ratio):
+        size = tf.data.experimental.cardinality(dataset)
+        def get_split(size, ratio):
+            size = size.numpy().astype(int)
+            ratio = ratio.numpy()
+            train = int(ratio[0]*size)
+            dev = int(ratio[1]*size)
+            test = size - (train+dev)
+            assert (ratio[0] == 0 or train != 0) and (ratio[1] == 0 or dev != 0) and\
+                (ratio[0]+ratio[1] == 1 or test != 0), 'Cannot split dataset of size ' + str(size)\
+                + ' into train/dev/test ratio ' + str(list(ratio)) +'.\nTrain/Dev/Test sizes were '\
+                + f'[{train},{dev},{test}]'
+            print(f'Splitting {size} batches into {train}:{dev}:{test} Train:Dev:Test.')
+            return train,dev,test
+        train,dev,test = tf.py_function(get_split, [size, ratio],[tf.int64, tf.int64, tf.int64])
+        train_ds = dataset.take(train)
+        other_ds = dataset.skip(train)
+        dev_ds = other_ds.take(dev)
+        test_ds = other_ds.skip(dev)
+        return train_ds, dev_ds, test_ds
 
     def __smooth_frames__(self):
         if self.__smoothing__ == 1: return
@@ -380,7 +507,11 @@ class MidiData():
             count += len(new_frames)
         
         self.__songs__ = np.array(new_songs)
-        print('Frames smoothed down to {}'.format(count))
+        if not self.__new_melody_file__ == None:
+            self.__new_melody__ = self.__new_melody__[::self.__smoothing__]
+            count += len(self.__new_melody__)
+
+        print('Frames smoothed down to {} frames.'.format(count))
 
     def __read_tracks_info_file__(self, tracks_info_file):
         self.__tracks_info__ = {}
@@ -404,40 +535,46 @@ class MidiData():
 
     def __open_from_folder__(self, folder):
         if folder[-1] != '/': folder += '/'
-        # print(folder)
         self.__open_files__([folder+f for f in listdir(folder) if f[-4:] == '.mid'])
 
     def __open_files__(self, midi_paths):
         self.__songs__ = None
+        self.__new_melody__ = None
         count_frames = 0
+        if not self.__new_melody_file__ == None:
+            self.__new_melody_file__ = self.__force_midi_extension__(self.__new_melody_file__)
+            midi_paths = midi_paths + [self.__new_melody_file__]
         print('Opening {} midi file(s)...'.format(len(midi_paths)))
         for index,midi_path in enumerate(midi_paths):
             
             midi_path = self.__force_midi_extension__(midi_path)
-            song = __Song__(midi_path).parse()
+            song = __Song__(midi_path, padding=(midi_path != self.__new_melody_file__)).parse()
             midi_file = midi_path.split('/')[-1]
             midi_file = self.__remove_midi_extension__(midi_file)
-            # print(midi_file)
             if not midi_file in self.__tracks_info__.keys(): 
                 print('No track info found for {} in tracks file. Skipping.'.format(midi_file))
                 continue
             info = self.__tracks_info__[self.__remove_midi_extension__(midi_file)]
             progress_msg = 'Parsing "{}"'.format(midi_file)
-            nbr_transposes = len(self.__transpose__)
-            for t_index, transpose in enumerate(self.__transpose__):
+            transposes = [0] if midi_path == self.__new_melody_file__ else self.__transpose__
+            nbr_transposes = len(transposes)
+            for t_index, transpose in enumerate(transposes):
                 melody_frames = song.instruments[info[MELODY_TRACK]].transpose_frames(transpose)
                 instrumental_frames =\
                     song.instruments[info[INSTRUMENT_TRACK]].transpose_frames(transpose)
                 count_frames += len(melody_frames) + len(instrumental_frames)
                 new_song_frames = [melody_frames, instrumental_frames]
-                if type(self.__songs__) == type(None): self.__songs__ = np.asarray(new_song_frames)
-                else: self.__songs__ = np.concatenate((self.__songs__, new_song_frames), axis=1)
-                util.showprogress((t_index+1)/(nbr_transposes*len(midi_paths)) + (index)/len(midi_paths),
-                    message=progress_msg, sub=True)
+                if midi_path == self.__new_melody_file__:
+                    # print(len(melody_frames))
+                    self.__new_melody__ = np.asarray(melody_frames)
+                else:
+                    if type(self.__songs__) == type(None):
+                        self.__songs__ = np.asarray(new_song_frames)
+                    else: self.__songs__ = np.concatenate((self.__songs__, new_song_frames), axis=1)
+                util.showprogress((t_index+1)/(nbr_transposes*len(midi_paths))\
+                    + (index)/len(midi_paths), message=progress_msg, sub=True)
             util.showprogress((index+1)/len(midi_paths), message=progress_msg)
         self.__songs__ = np.asarray(self.__songs__)
-        # print(self.__songs__)
-        # print(self.__songs__.shape)
         print('Loaded {} frames.'.format(count_frames))               
 
 
@@ -456,7 +593,6 @@ class __Track__():
             msg_type = message.type
             if msg_type == 'note_on' or msg_type == 'note_off':
                 delta_time,channel,note,velocity = self.__get_note_info__(message)
-                # print(msg_type, velocity)
                 self.__maybe_update_frames__(delta_time)
                 if msg_type == 'note_off': velocity = 0
                 self.__maybe_set_channel__(channel+1)
@@ -472,7 +608,6 @@ class __Track__():
                 self.tempo = round(60000000 / MPQN, 2)
         if len(self.current_frame) > 0: self.__maybe_update_frames__()
         self.frames = np.asarray(self.frames)
-        # print(self.frames)
         return self
 
     def transpose_frames(self, amount):
@@ -561,8 +696,9 @@ class __Track__():
 
 
 class __Song__():
-    def __init__(self, midi_file, binary_velocity=True):
+    def __init__(self, midi_file, binary_velocity=True, padding=True):
         self.midi_file = midi_file
+        self.__padding__ = padding
         self.mido = MidiFile(midi_file)
         self.binary_velocity = binary_velocity
         self.tempo = None
@@ -573,7 +709,7 @@ class __Song__():
             track = __Track__(midi_track, self.binary_velocity)
             track.parse()
             self.__add_instrument__(track)
-        self.__pad_frames__()
+        if self.__padding__: self.__pad_frames__()
         if self.tempo == None: self.tempo = DEFAULT_TEMPO
         return self
 
@@ -582,19 +718,16 @@ class __Song__():
             self.tempo = track.tempo
         if len(track.frames) > 0:
             # Only add the track as an instrument if it has frames
+            # print('length is ', len(track.frames))
             self.instruments.append(track)
     
     def __pad_frames__(self):
         length = max([len(instrument.frames) for instrument in self.instruments])
-        # print(length)
         for i,instrument in enumerate(self.instruments):
-            # print(instrument.frames.shape)
             frames = instrument.frames
-            # print(type(frames))
             padded_frames = np.zeros((length, frames.shape[1]), dtype=int)
             padded_frames[:frames.shape[0]] = frames
             self.instruments[i].frames = padded_frames
-            # print(padded_frames.shape)
     
     def toDimp(self, name:str='', relative_path=''):
         name = name if name != '' else self.midi_file[:-4] + FILE_EXTENSION
@@ -604,7 +737,6 @@ class __Song__():
         path = relative_path+name
         with open(path, 'w') as f:
             f.write(f'Tempo:{self.tempo}\n')
-            # f.write(f'FramesPerTick:{self.samples_per_tick}\n')
             f.write(f'NbrInstruments:{len(self.instruments)}\n')
             for i,instrument in enumerate(self.instruments):
                 f.write(f'Instrument#{i+1}{{\n')
@@ -626,8 +758,15 @@ if __name__ == '__main__':
 
     if debug: tf.enable_eager_execution()
 
-    mididata = MidiData('midis/tracks.csv', open_files=['midis/white christmas.mid'],
-        smoothing=1)
+    mididata = MidiData('midis/tracks.csv', open_files=['midis/modern tidings.mid'],
+        smoothing=32, new_melody_file='midis/smile')
+
+    # frame = np.random.rand(3,128)
+    # frame[frame >= .9] = 1
+    # frame[frame < .9] = 0
+    # print(frame)
+    # print(mididata.extract_notes_only(frame, with_root=True))
+
 
     # probs = np.random.rand(128)
     # frames = mididata.probs_to_frames(probs, k=1)
@@ -636,12 +775,14 @@ if __name__ == '__main__':
     
     # ---Debugging---
     if debug or False:
-        data = mididata.get_instr_batched_dataset(sequence_length=96*6, batch_size=1, output_frames=True)
+        data, _, _  = mididata.get_instr_batched_dataset(sequence_length=15, batch_size=8,\
+            output_frames=True, ratio=[.5,.2])
         # print(type(data))
         for i,d in enumerate(data):
             # print(d)
             # if i == 0: print(d)
-            mididata.export_model_output_to_midi(d[1].numpy()[0], midi_file=f'generated{i}.mid', from_frames=True)
+            mididata.export_model_output_to_midi(d[1].numpy()[0],\
+                midi_file=f'generated{i}.mid', from_frames=True)
             # __Track__.toFile(self.instr_idx_to_frames(d[0].numpy()[1]),
             #    file=f'generated{i}.mid', smoothing=self.__smoothing__)
             if i == 9: break
