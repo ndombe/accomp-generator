@@ -104,6 +104,7 @@ class MidiData():
                 len(mel_vocab), len(reduced_mel_vocab), len(instr_vocab), len(reduced_instr_vocab)))
 
         print('MidiData object ready!')
+        # print(list(self.__np_instr_vocab__[1000]))
 
 
     def chopin(self, labels, logits, k=1, from_frames=False, cut_threshold=.75):
@@ -186,7 +187,7 @@ class MidiData():
         """
         return np.where(self.__vocab__[1]==str(tuple(frame)))
 
-    def compute_vocab_chopin_distribution(self, ref_frame, from_frame=False):
+    def compute_vocab_chopin_distribution(self, ref_frames, from_frame=False):
         """
         TODO: complete documentation
         NOTE (Assumption): this is used to fetch frames from the instrumental vocabulary only.
@@ -194,10 +195,12 @@ class MidiData():
         if not from_frame:
             # `ref` is an integer representing the index of the desired reference frame
             # TODO: check for integer/float type
-            ref_frame = int(ref_frame)
-            ref_frame = self.__np_instr_vocab__[ref_frame]
+            # ref_frames = np.array(ref_frames, dtype=int)
+            # ref_frames = np.apply_along_axis(lambda x: )
+            ref_frames = int(ref_frames)
+            ref_frames = self.__np_instr_vocab__[ref_frames]
         
-        references = np.array([ref_frame,]*self.get_vocabs_sizes()[1])
+        references = np.array([ref_frames,]*self.get_vocabs_sizes()[1])
         candidates = deepcopy(self.__np_instr_vocab__)
 
         scores = util.chopin(references, candidates)
@@ -309,7 +312,7 @@ class MidiData():
                 consecutive `sequence_length` frames and skipping `stride` frames from one sequence
                 to the other. The stride has to be greater than 0. Defatul 5.
 
-        @return a 3-tuple where each element represent respectively the training dataset, the
+        @return a 3-tuple where each element represents respectively the training dataset, the
                 dev/validation dataset and the test dataset. Each dataset contains 2 sequences: the
                 first sequence corresponds to the input we would feed to the model and the second
                 sequence corresponds to the output we expect the model to predict (true label). The
@@ -378,7 +381,7 @@ class MidiData():
                 consecutive `sequence_length` frames and skipping `stride` frames from one sequence
                 to the other. The stride has to be greater than 0. Defatul 5.
 
-        @return a 3-tuple where each element represent respectively the training dataset, the
+        @return a 3-tuple where each element represents respectively the training dataset, the
                 dev/validation dataset and the test dataset. Each dataset contains 2 sequences: the
                 first sequence corresponds to the input we would feed to the model and the second
                 sequence corresponds to the output we expect the model to predict (true label). The
@@ -392,7 +395,7 @@ class MidiData():
             data.get_mel_to_instr_batched_dataset(sequence_length=500, batch_size=256)
         """
         mel_seq = tf.data.Dataset.from_tensor_slices(
-            self.__mel_as_int__ if not reduced_mel eslse self.__reduced_mel_as_int__)\
+            self.__mel_as_int__ if not reduced_mel else self.__reduced_mel_as_int__)\
             .apply(sliding_window_batch(window_size=sequence_length+1, stride=stride))
             # .batch(sequence_length+1, drop_remainder=True)
         instr_seq = tf.data.Dataset.from_tensor_slices(
@@ -822,6 +825,13 @@ if __name__ == '__main__':
     # print(frame)
     # print(mididata.extract_notes_only(frame, with_root=True))
 
+    frame = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    p = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, .9, 0.1, 0, 0, 0, 0, 0, 0, .89, 0, 0, 0, .9, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    frame = np.array(p)
+    f = mididata.compute_vocab_chopin_distribution(10)
+    print(list(f))
+    print(np.argmax(f))
+
 
     # probs = np.random.rand(128)
     # frames = mididata.probs_to_frames(probs, k=1)
@@ -829,7 +839,7 @@ if __name__ == '__main__':
     # print(mididata.get_frame_index(frames))
     
     # ---Debugging---
-    if debug or False:
+    if debug and False:
         tdata, data, _  = mididata.get_instr_batched_dataset(sequence_length=64, batch_size=2,\
             ratio=[.6,.2])
         # print(type(data))
