@@ -78,11 +78,14 @@ def chopin(references, candidates, mean=False):
             respective score against the corresponding references frame; if `mean` is True, the mean
             of all the scores for all the frames.
     """
-    references, candidates = np.asarray(references, dtype=int), np.asarray(candidates, dtype=int)
+    references, candidates = np.array(references, dtype=int), np.array(candidates, dtype=int)
     assert references.ndim >= candidates.ndim and references.ndim > 0, "The references and "\
-            +"candidates arrays must have the same number of dimensions"
+            +"candidates arrays must have the same dimensions"
+    NOTES_RANGE = candidates.shape[-1]
     stacked = np.stack([references, candidates], axis=-2)
-    nonzeros = np.apply_along_axis(lambda x: str(np.nonzero(x)[0]), -1, stacked)
+    nonzeros = np.apply_along_axis(lambda x: str(np.nonzero(x)[0]), -1, stacked)#.astype(np.dtype(('U', 16)))
+    # print()
+    # print(list(nonzeros))
 
     def seq2score(nonzeros):
         ref_idx, can_idx = nonzeros
@@ -95,51 +98,72 @@ def chopin(references, candidates, mean=False):
             # `reference`.
             return 0
         elif ref_idx.shape[0] == 0 and can_idx.shape[0] == 0:
-            # `candidate` didn't play where `reference` didn't play. This is a 100% match.
+            # `candidate` didn't play where `reference` didn't play. This is 100% match.
             return 1
 
-        root_score = 1
-        ref_to_can = 1
-        can_to_ref = 1
+        root_score = 1.
+        ref2can_activation = 1.
+        can2ref_activation = 1.
         NBR_NOTES = 12
 
         # As far as the Chopin score is concerned, we're only interested in the musical notes, not
         # the octave in which they're played. Therefore, we simplify all of them to the basic 12
         # notes.
-        ref_idx = ref_idx%NBR_NOTES
-        can_idx = can_idx%NBR_NOTES
+        reduced_ref_idx = ref_idx%NBR_NOTES
+        reduced_can_idx = can_idx%NBR_NOTES
 
         # Root Score
-        if can_idx[0] == ref_idx[0]:
+        if reduced_can_idx[0] == reduced_ref_idx[0]:
             # `candidate` has the same root note as `reference`. 100% match on the root.
             root_score = 1
-        elif can_idx[0] in ref_idx[1:]:
+        elif reduced_can_idx[0] in reduced_ref_idx[1:]:
             # If the root note in the candidate is a valid relative 3rd or 5th of the root note in
             # the reference and exists amongst the notes of the reference, then it's not a total
             # match but a very probably one (75%). Else if the new root note is not a relative of
             # the old root note, but is still amongst the notes in reference, then we give it 50%.
-            true_root = ref_idx[0]
+            true_root = reduced_ref_idx[0]
             relatives = [(true_root+i)%NBR_NOTES for i in [3,4,6,7,8]]
-            root_score = .75 if can_idx[0] in relatives else .5
+            root_score = .75 if reduced_can_idx[0] in relatives else .5
         else:
-            root_score = .25
+            root_score = .1
         
         # Reference to Candidate Score
-        for note in ref_idx[1:]:
-            if note not in can_idx:
-                ref_to_can -= 1/len(ref_idx[1:])
+        for note in reduced_ref_idx[1:]:
+            if note not in reduced_can_idx:
+                ref2can_activation -= 1/len(reduced_ref_idx[1:])
+
+        # Reference to Candidate Average Note Proximity
+        ref2can_proximity = np.mean(list(map(
+            lambda x: np.max((NOTES_RANGE - np.abs(can_idx-x))/NOTES_RANGE), ref_idx)))
+        
 
         # Candidate to Reference Score
-        for note in can_idx[1:]:
-            if note not in ref_idx:
-                can_to_ref -= 1/len(can_idx[1:])
+        for note in reduced_can_idx[1:]:
+            if note not in reduced_ref_idx:
+                can2ref_activation -= 1/len(reduced_can_idx[1:])
 
-        return root_score*ref_to_can*can_to_ref*100
+        # Candidate to Reference Average Note Proximity
+        can2ref_proximity = np.mean(list(map(
+            lambda x: np.max((NOTES_RANGE - np.abs(ref_idx-x))/NOTES_RANGE), can_idx)))
 
-    scores = np.apply_along_axis(seq2score, -1, nonzeros)
+        # ref2can_proximity = 1.
+        # can2ref_proximity = 1.
+        score =\
+            root_score*ref2can_activation*can2ref_activation*ref2can_proximity*can2ref_proximity*100
+        # print(score)
+        return score
+
+    # NOTE: An existing issue with numpy (https://github.com/numpy/numpy/issues/8352) is casting
+    # of the regular `np.apply_along_axis` into integers while the score function was verified to be
+    # correctly returning floats. This is why we're using the equivalent of this function under
+    # `np.ma`. Benchmarks tests show that it runs a bit slower, but at least we keep the decimal
+    # precision that we need.
+    scores = np.ma.apply_along_axis(seq2score, -1, nonzeros)
+    # print(list(scores))
     if mean:
         return np.mean(scores)
     else:
+        
         return scores
 
 if __name__ == '__main__':
@@ -152,9 +176,17 @@ if __name__ == '__main__':
     can = [[[0,1,1,1], [0,1,1,0], [0,1,1,0]], [[1,0,1,1], [1,0,1,1], [0,0,1,0]]]
     # ref = [1,1,1,0]
     # can = [0,0,1,0]
-    ref = [[1,0,1,1], [1,0,1,1], [0,1,1,0]]
-    can = [[0,1,1,1], [0,1,1,0], [0,1,1,0]]
+    # ref = [[1,0,1,1], [1,0,1,1], [0,1,1,0]]
+    # can = [[0,1,1,1], [0,1,1,0], [0,1,1,0]]
+    
+    ref = np.array([np.random.rand(128)]*1698)
+    # ref = np.random.rand(1698,128)
+    ref[ref >= .9] = 1
+    ref[ref < .9] = 0
+    can = np.random.rand(1698,128)
+    can[can >= .9] = 1
+    can[can < .9] = 0
 
     s = chopin(ref, can)
-    s /= 6
+    # s /= 6
     print(s)

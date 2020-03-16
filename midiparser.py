@@ -1,5 +1,6 @@
 from ast import literal_eval
 from copy import deepcopy
+from itertools import product
 from tensorflow.contrib.data import sliding_window_batch
 from mido import Message, MidiFile, MidiTrack
 from os import listdir
@@ -18,8 +19,8 @@ INSTRUMENT_TRACK = 'instrument'
 
 class MidiData():
     # *********PUBLIC/IMPORTANT METHODS************
-    def __init__(self, tracks_info_file, open_files=None, open_from_folder=None, smoothing=1,
-            transpose=[0], new_melody_file=None):
+    def __init__(self, tracks_info_file, open_files=None, open_from_folder=None, smoothing=16,
+            transpose=[0]):
         """
         Creates an instance of MidiData. This is called automatically when you call 'MidiData()',
         see example usage below.
@@ -34,13 +35,14 @@ class MidiData():
                 granular as they can be (96 frames per beat). A greater smoothing value means less
                 granularity (useful for only retaining the most important note/chord changes and
                 ignoring the potential small variations, especially when there are many such small
-                variations).
+                variations). Default 16.
         @param transpose (optional): an array of at least one integer. This will decide if we want
                 to transpose the midi data. If this argument is used, it should usually take a value
                 like this [-4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7]. With an argument like this one,
                 the returned data would contain, in addition to the original data in the midi file,
                 4 copies of the same data transposed respectively 4, 3, 2 and 1 times downward, then
                 7 copies of the original data transposed respectively 1...7 times upward.
+                Default [0].
         
         Example Usage:
         data = MidiData('path/to/csv/file/tracks.csv', open_files=['midi/folder/song1.mid',
@@ -53,43 +55,39 @@ class MidiData():
         self.__transpose__ = transpose
         self.__read_tracks_info_file__(tracks_info_file)
         self.__smoothing__ = smoothing
-        self.__new_melody_file__ = new_melody_file
+        self.__generate_reduced_melody_vocab__()
         if open_from_folder: self.__open_from_folder__(open_from_folder)
         elif open_files: self.__open_files__(open_files)
         self.__smooth_frames__()
         print('Extracting vocabulary...')
-        self.__reduced_new_melody__ = None if self.__new_melody_file__ == None else\
-                self.extract_notes_only(self.__new_melody__)
         frame2str = lambda x: str(tuple(x))
-        all_melodies = self.__songs__[0] if self.__new_melody_file__ == None else\
-                np.concatenate((self.__songs__[0], self.__new_melody__))
-        mel_as_str = np.apply_along_axis(frame2str, 1, all_melodies).tolist()
+        
+        # NOTE(1): We're disabling unreduced melodies. A reduced melody vocabulary is generated
+        # before even reading the files so that we don't need to load any 'new_melody' in advance
+        # but can any such 'new_melody' file after training, and it will still read from the same
+        # vocabulary.
+        # mel_as_str = np.apply_along_axis(frame2str, 1, all_melodies).tolist()
         instr_as_str = np.apply_along_axis(frame2str, 1, self.__songs__[1]).tolist()
-        reduced_mel_as_str = np.apply_along_axis(
-            frame2str, 1, self.extract_notes_only(all_melodies)).tolist()
+        # reduced_mel_as_str = np.apply_along_axis(
+        #     frame2str, 1, self.extract_notes_only(self.__songs__[0])).tolist()
         reduced_instr_as_str = np.apply_along_axis(
             frame2str, 1, self.extract_notes_only(self.__songs__[1], with_root=True)).tolist()
 
-        mel_vocab, self.__mel_as_int__ = np.unique(mel_as_str, return_inverse=True)
-        reduced_mel_vocab, self.__reduced_mel_as_int__ = np.unique(
-            reduced_mel_as_str, return_inverse=True)
-        instr_vocab, self.__instr_as_int__ = np.unique(instr_as_str, return_inverse=True)
-        reduced_instr_vocab, self.__reduced_instr_as_int__ = np.unique(
+        # See NOTE(1).
+        # mel_vocab, self.__mel_as_int__ = np.unique(mel_as_str, return_inverse=True)
+
+        self.__reduced_mel_as_int__ = np.apply_along_axis(
+            lambda x: self.__reduced_mel_vocab__.index(str(tuple(x))), -1,\
+            self.extract_notes_only(self.__songs__[0]))
+        self.__instr_vocab__, self.__instr_as_int__ = np.unique(instr_as_str, return_inverse=True)
+        self.__reduced_instr_vocab__, self.__reduced_instr_as_int__ = np.unique(
             reduced_instr_as_str, return_inverse=True)
-        # Remove the melody input from the data that'll be used for training
-        if not self.__new_melody_file__ == None:
-            self.__new_mel_as_int__ = self.__mel_as_int__[-len(self.__new_melody__):]
-            self.__mel_as_int__ = self.__mel_as_int__[:-len(self.__new_melody__)]
-            self.__reduced_new_mel_as_int__ =\
-                self.__reduced_mel_as_int__[-len(self.__new_melody__):]
-            self.__reduced_mel_as_int__ = self.__reduced_mel_as_int__[:-len(self.__new_melody__)]
-            
-        self.__vocab__ = (mel_vocab, instr_vocab)
-        self.__reduced_vocab__ = (reduced_mel_vocab, reduced_instr_vocab)
+
+        self.__vocab__ = (None, self.__instr_vocab__)
+        self.__reduced_vocab__ = (self.__reduced_mel_vocab__, self.__reduced_instr_vocab__)
         print('Extracted vocabulary as int.')
         print('Extracting vocabulary as frames...')
-        self.__np_mel_vocab__ = self.mel_idx_to_frames(np.arange(len(mel_vocab)))
-        self.__np_instr_vocab__ = self.instr_idx_to_frames(np.arange(len(instr_vocab)))
+        self.__np_instr_vocab__ = self.instr_idx_to_frames(np.arange(len(self.__instr_vocab__)))
         # TODO(ndombe): until we start using the mel_vocab_nonzero_count, it's wasteful to compute
         # it.
         # self.__mel_vocab_nonzero_count__ =\
@@ -99,12 +97,11 @@ class MidiData():
             np.apply_along_axis(
                 lambda x: len(np.nonzero(x)) if len(np.nonzero(x)) > 0 else 1,
                 -1, self.__np_instr_vocab__)
-        print('Vocabularty size (melody: {}, reduced-melody: {}, instr: {}, reduced-instr: {})'\
-            .format(
-                len(mel_vocab), len(reduced_mel_vocab), len(instr_vocab), len(reduced_instr_vocab)))
+        print('Vocabularty size (reduced-melody: {}, instr: {}, reduced-instr: {})'\
+            .format(len(self.__reduced_mel_vocab__), len(self.__instr_vocab__),\
+            len(self.__reduced_instr_vocab__)))
 
         print('MidiData object ready!')
-        # print(list(self.__np_instr_vocab__[1000]))
 
 
     def chopin(self, labels, logits, k=1, from_frames=False, cut_threshold=.75):
@@ -191,23 +188,40 @@ class MidiData():
         """
         TODO: complete documentation
         NOTE (Assumption): this is used to fetch frames from the instrumental vocabulary only.
+        TODO: add a flag for melody
         """
         if not from_frame:
             # `ref` is an integer representing the index of the desired reference frame
             # TODO: check for integer/float type
-            # ref_frames = np.array(ref_frames, dtype=int)
-            # ref_frames = np.apply_along_axis(lambda x: )
-            ref_frames = int(ref_frames)
-            ref_frames = self.__np_instr_vocab__[ref_frames]
+            ref_frames = np.array(ref_frames)
+            ref_frames = self.instr_idx_to_frames(ref_frames)
         
-        references = np.array([ref_frames,]*self.get_vocabs_sizes()[1])
-        candidates = deepcopy(self.__np_instr_vocab__)
+        candidates = np.array(self.__np_instr_vocab__)
+        def get_chopin(ref_frame):
+            references = np.array([ref_frame,]*self.get_vocabs_sizes()[1])
+            score = util.chopin(references, candidates)
+            return score
 
-        scores = util.chopin(references, candidates)
+        scores = np.apply_along_axis(get_chopin, -1, ref_frames)
+
+        
         return scores
+
+    def get_mel_vocab(self):
+        # TODO: missing documentation
+
+        # See NOTE(1)
+        return self.__reduced_mel_vocab__
+
+    def get_instr_vocab(self, reduced=False):
+        # TODO: missing documentation
+        return self.__reduced_instr_vocab__ if reduced else self.__instr_vocab__
 
     def get_vocabs(self, reduced=False):
         """
+        DEPRECATED! Use `get_instr_vocab` or `get_mel_vocab` instead. This functino will
+        be removed.
+
         Get the unique frames from the loaded data, aka the vocabulary. Note that this returns 2
         sets of frames, the first one corresponding to the melody and the second one to the
         instrumental.
@@ -237,10 +251,21 @@ class MidiData():
         ]
         """
         vocab = self.__vocab__ if not reduced else self.__reduced_vocab__
-        return vocab[0], vocab[1]
+        return None, vocab[1]
+
+    def get_mel_vocab_size(self):
+        # TODO: missing documentation
+        return len(self.get_mel_vocab())
+
+    def get_instr_vocab_size(self, reduced=False):
+        # TODO: missing documentation
+        return len(self.get_instr_vocab(reduced))
 
     def get_vocabs_sizes(self, reduced=False):
         """
+        DEPRECATED! Use `get_instr_vocab_size` or `get_mel_vocab_size` instead. This functino will
+        be removed.
+
         Get the number of unique frames, aka the size of the vocabulary. Note that this returns 2
         sizes, the first one corresponding to the size of unique frames in the melody, and the
         second one corresponding to the size of frames in the instrumental.
@@ -259,13 +284,7 @@ class MidiData():
         instr_vocab_size = len(instr_vocab)
         """
         vocab = self.__vocab__ if not reduced else self.__reduced_vocab__
-        return len(vocab[0]), len(vocab[1])
-
-    def get_new_melody_as_int(self, reduced=False):
-        """
-        TODO(ndombe): missing documentation
-        """
-        return self.__new_mel_as_int__ if not reduced else self.__reduced_new_mel_as_int__
+        return None, len(vocab[1])
 
     def get_frames_as_int(self, reduced=False):
         """
@@ -279,7 +298,9 @@ class MidiData():
         data = MidiData(...)
         mel_as_int, instr_as_int = data.get_frames_as_int()
         """
-        return (self.__mel_as_int__ if not reduced else self.__reduced_mel_as_int__,
+
+        # See NOTE(1)
+        return (self.__reduced_mel_as_int__,
                 self.__instr_as_int__ if not reduced else self.__reduced_instr_as_int__)
 
     def get_instr_batched_dataset(self, sequence_length=(96), batch_size=64, buffer_size=10000,
@@ -348,7 +369,7 @@ class MidiData():
 
 
     def get_mel_to_instr_batched_dataset(self, sequence_length=(96), batch_size=64,
-            buffer_size=10000, reduced_mel=False, reduced_instr=False, ratio=[.8,.1], stride=5):
+            buffer_size=10000, reduced=False, ratio=[.8,.1], stride=5):
         """
         Get the original frames expressed as their respective integer index according to the
         unique frames vocabulary. Note that this returns 2 arrays, the first one containing the
@@ -359,19 +380,16 @@ class MidiData():
         @param batch_size: in integer that determines the number of sequecences we want to have in
                 each batch that we'll feed to the model. Default 64.
         @param buffer_size: in integer used when shuffling the data. Default 10000.
-        @param reduced_mel: a boolean determining if we want the melody dataset to contain indices
-                into the vocabulary of the original melody frames or indices into a vocabulary of
-                the reduced melody frames. Reduced frames are frames that only contain information
-                about the activated notes, regardless of what octaves they belong to. Reduced frames
-                from the melody vocabular are of length 12, i.e they only contain information about
-                the activation status of the 12 musical notes (C, C#, D, D#, E, F, F#, G, G#, A, A#
-                and B). Default False.
-        @param reduced_instr: a boolean determining if we want the melody dataset to contain indices
-                into the vocabulary of the original melody frames or indices into a vocabulary of
-                the reduced melody frames. Reduced frames from the instrumental vocabular are of
-                length 24, i.e, on octave with exactly one activated note (the root note) and the
-                other one with the activation status of any remaining note in the original frame.
-                Default False.
+        @param reduced: a boolean determining if we want the dataset to contain indices into the
+                vocabulary of the original frames or indices into a vocabulary of the reduced
+                frames. Reduced frames are frames that only contain information about the activated
+                notes, regardless of what octaves they belong to. Reduced frames from the melody
+                vocabular are of length 12, i.e they only contain information about the activation
+                status of the 12 musical notes (C, C#, D, D#, E, F, F#, G, G#, A, A# and B). Whereas
+                reduced frames from the instrumental vocabular are of length 24, i.e, on octave with
+                exactly one activated note (the root note) and the other one with the activation
+                status of any remaining note in the original frame. Default False.
+                NOTE: the melody will always be reduced.
         @param ratio: a list of 2 float numbers both between 0 and 1. The first number indicate the
                 percentage of the final number of batches that we want to allocate as training data.
                 The second is the percentage of total batch number to allocate as dev/validation
@@ -394,12 +412,12 @@ class MidiData():
         mel_to_instr_dataset =
             data.get_mel_to_instr_batched_dataset(sequence_length=500, batch_size=256)
         """
-        mel_seq = tf.data.Dataset.from_tensor_slices(
-            self.__mel_as_int__ if not reduced_mel else self.__reduced_mel_as_int__)\
+        # See NOTE(1)
+        mel_seq = tf.data.Dataset.from_tensor_slices(self.__reduced_mel_as_int__)\
             .apply(sliding_window_batch(window_size=sequence_length+1, stride=stride))
             # .batch(sequence_length+1, drop_remainder=True)
         instr_seq = tf.data.Dataset.from_tensor_slices(
-            self.__instr_as_int__ if not reduced_instr else self.__reduced_instr_as_int__)\
+            self.__instr_as_int__ if not reduced else self.__reduced_instr_as_int__)\
             .apply(sliding_window_batch(window_size=sequence_length+1, stride=stride))
             # .batch(sequence_length+1, drop_remainder=True)
 
@@ -450,8 +468,11 @@ class MidiData():
         predicted_frames = data.mel_idx_to_frames(predictions)
         """
 
-        map_idx_vector_to_frames = lambda x: np.array(literal_eval(self.__vocab__[1][x]))
-        map_all_idx_to_frames = lambda x: np.array(list(map(map_idx_vector_to_frames, x)))
+        # See NOTE(1)
+        map_idx_vector_to_frames = lambda x: np.array(
+            literal_eval(self.__reduced_mel_vocab__[int(x)]))
+        map_all_idx_to_frames = lambda x: np.array(
+            list(map(map_idx_vector_to_frames, x)))
         return np.apply_along_axis(map_all_idx_to_frames, -1, idx_array)
 
     def instr_idx_to_frames(self, idx_array):
@@ -469,8 +490,9 @@ class MidiData():
         predicted_frames = data.instr_idx_to_frames(predictions)
         """
 
-        map_idx_vector_to_frames = lambda x: np.array(literal_eval(self.__vocab__[1][x]))
-        map_all_idx_to_frames = lambda x: np.array(list(map(map_idx_vector_to_frames, x)))
+        map_idx_vector_to_frames = lambda x: np.array(literal_eval(self.__instr_vocab__[int(x)]))
+        map_all_idx_to_frames = lambda x: np.array(
+            list(map(map_idx_vector_to_frames, x)))
         return np.apply_along_axis(map_all_idx_to_frames, -1, idx_array)
 
     def extract_notes_only(self, frames, with_root=False):
@@ -504,8 +526,43 @@ class MidiData():
         new_frames = np.apply_along_axis(extract, -1, frames)
         return new_frames
 
+    def get_new_melody_as_int(self):
+        """
+        TODO: missing documentation
+        See NOTE(1)
+        """
+        return self.__reduced_new_melody_as_int__
+
+    def load_new_melody(self, midi_path):
+        """
+        TODO: missing documentation
+        See NOTE(1)
+        """
+        midi_path = self.__force_midi_extension__(midi_path)
+        song = __Song__(midi_path, padding=False).parse()
+        midi_file = midi_path.split('/')[-1]
+        midi_file = self.__remove_midi_extension__(midi_file)
+        if not midi_file in self.__tracks_info__.keys():
+            print('No track info found for {} in tracks file. Skipping.'.format(midi_file))
+            continue
+        info = self.__tracks_info__[self.__remove_midi_extension__(midi_file)]
+        self.__new_melody__ = song.instruments[info[MELODY_TRACK]].transpose_frames(0)
+        count_frames += len(self.__new_melody__)
+        if self.__smoothing__ > 1:
+            self.__new_melody__ = np.array(self.__new_melody__[::self.__smoothing__])
+        
+        self.__reduced_new_melody__ = self.extract_notes_only(self.__new_melody__)
+        self.__reduced_new_melody_as_int__ = np.apply_along_axis(
+            lambda x: self.__reduced_mel_vocab__.index(str(tuple(x))), -1,\
+            self.__reduced_new_melody__)
+
 
     # ******************END PUBLIC/IMPORTANT METHODS***************************
+
+    def __generate_reduced_melody_vocab__(self):
+        tuple_vocab = product([0,1], repeat=12)
+        self.__np_reduced_mel_vocab__ = np.array(tuple_vocab)
+        self.__reduced_mel_vocab__ = list(map(lambda x: str(x), tuple_vocab))
 
     def __probs_to_k_frame__(self, notes_probs):
         # notes_probs = tf.expand_dims(notes_probs, 0)
@@ -565,10 +622,6 @@ class MidiData():
             count += len(new_frames)
         
         self.__songs__ = np.array(new_songs)
-        if not self.__new_melody_file__ == None:
-            self.__new_melody__ = self.__new_melody__[::self.__smoothing__]
-            count += len(self.__new_melody__)
-
         print('Frames smoothed down to {} frames.'.format(count))
 
     def __read_tracks_info_file__(self, tracks_info_file):
@@ -597,16 +650,11 @@ class MidiData():
 
     def __open_files__(self, midi_paths):
         self.__songs__ = None
-        self.__new_melody__ = None
         count_frames = 0
-        if not self.__new_melody_file__ == None:
-            self.__new_melody_file__ = self.__force_midi_extension__(self.__new_melody_file__)
-            midi_paths = midi_paths + [self.__new_melody_file__]
         print('Opening {} midi file(s)...'.format(len(midi_paths)))
         for index,midi_path in enumerate(midi_paths):
-            
             midi_path = self.__force_midi_extension__(midi_path)
-            song = __Song__(midi_path, padding=(midi_path != self.__new_melody_file__)).parse()
+            song = __Song__(midi_path).parse()
             midi_file = midi_path.split('/')[-1]
             midi_file = self.__remove_midi_extension__(midi_file)
             if not midi_file in self.__tracks_info__.keys(): 
@@ -614,7 +662,7 @@ class MidiData():
                 continue
             info = self.__tracks_info__[self.__remove_midi_extension__(midi_file)]
             progress_msg = 'Parsing "{}"'.format(midi_file)
-            transposes = [0] if midi_path == self.__new_melody_file__ else self.__transpose__
+            transposes = self.__transpose__
             nbr_transposes = len(transposes)
             for t_index, transpose in enumerate(transposes):
                 melody_frames = song.instruments[info[MELODY_TRACK]].transpose_frames(transpose)
@@ -622,13 +670,9 @@ class MidiData():
                     song.instruments[info[INSTRUMENT_TRACK]].transpose_frames(transpose)
                 count_frames += len(melody_frames) + len(instrumental_frames)
                 new_song_frames = [melody_frames, instrumental_frames]
-                if midi_path == self.__new_melody_file__:
-                    # print(len(melody_frames))
-                    self.__new_melody__ = np.asarray(melody_frames)
-                else:
-                    if type(self.__songs__) == type(None):
-                        self.__songs__ = np.asarray(new_song_frames)
-                    else: self.__songs__ = np.concatenate((self.__songs__, new_song_frames), axis=1)
+                if type(self.__songs__) == type(None):
+                    self.__songs__ = np.asarray(new_song_frames)
+                else: self.__songs__ = np.concatenate((self.__songs__, new_song_frames), axis=1)
                 util.showprogress((t_index+1)/(nbr_transposes*len(midi_paths))\
                     + (index)/len(midi_paths), message=progress_msg, sub=True)
             util.showprogress((index+1)/len(midi_paths), message=progress_msg)
@@ -817,7 +861,7 @@ if __name__ == '__main__':
     if debug: tf.enable_eager_execution()
 
     mididata = MidiData('midis/tracks.csv', open_files=['midis/modern tidings.mid'],
-        smoothing=32, new_melody_file='midis/smile', transpose=[-3,-2,-1,0,1,2,3])
+        smoothing=32, transpose=[-3,-2,-1,0,1,2,3])
 
     # frame = np.random.rand(3,128)
     # frame[frame >= .9] = 1
@@ -828,9 +872,11 @@ if __name__ == '__main__':
     frame = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     p = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, .9, 0.1, 0, 0, 0, 0, 0, 0, .89, 0, 0, 0, .9, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     frame = np.array(p)
-    f = mididata.compute_vocab_chopin_distribution(10)
-    print(list(f))
-    print(np.argmax(f))
+    # f = mididata.compute_vocab_chopin_distribution([[[10, 52], [23, 69]], [[2,85], [35,94]]])
+    f = mididata.compute_vocab_chopin_distribution([25])
+    # print(list(f.tolist()))
+    # print(f[0][6])
+    print(np.argmax(f, axis=-1))
 
 
     # probs = np.random.rand(128)
@@ -839,9 +885,9 @@ if __name__ == '__main__':
     # print(mididata.get_frame_index(frames))
     
     # ---Debugging---
-    if debug and False:
-        tdata, data, _  = mididata.get_instr_batched_dataset(sequence_length=64, batch_size=2,\
-            ratio=[.6,.2])
+    if debug or False:
+        data, ddata, tdata  = mididata.get_instr_batched_dataset(sequence_length=64, batch_size=2,\
+            smoothing=16, ratio=[.6,.2])
         # print(type(data))
         for i,d in enumerate(data):
             # print(d)
@@ -853,14 +899,14 @@ if __name__ == '__main__':
             # __Track__.toFile(self.instr_idx_to_frames(d[0].numpy()[1]),
             #    file=f'generated{i}.mid', smoothing=self.__smoothing__)
             if i == 9: break
-        for i,d in enumerate(tdata):
-            # print(d)
-            # if i == 0: print(d)
-            mididata.export_model_output_to_midi(d[0].numpy()[0],\
-                midi_file=f'train_generated0{i}.mid')
-            mididata.export_model_output_to_midi(d[1].numpy()[0],\
-                midi_file=f'train_generated1{i}.mid')
-            # __Track__.toFile(self.instr_idx_to_frames(d[0].numpy()[1]),
-            #    file=f'generated{i}.mid', smoothing=self.__smoothing__)
-            if i == 9: break
+        # for i,d in enumerate(ddata):
+        #     # print(d)
+        #     # if i == 0: print(d)
+        #     mididata.export_model_output_to_midi(d[0].numpy()[0],\
+        #         midi_file=f'train_generated0{i}.mid')
+        #     mididata.export_model_output_to_midi(d[1].numpy()[0],\
+        #         midi_file=f'train_generated1{i}.mid')
+        #     # __Track__.toFile(self.instr_idx_to_frames(d[0].numpy()[1]),
+        #     #    file=f'generated{i}.mid', smoothing=self.__smoothing__)
+        #     if i == 9: break
     # print(data.get_vocabs_sizes())
