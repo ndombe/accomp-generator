@@ -1,6 +1,7 @@
 from midiparser import MidiData
 from tensorflow.keras import layers
 from util import showprogress
+from matplotlib import pyplot as plt
 import os
 import random
 import tensorflow as tf
@@ -8,13 +9,22 @@ import numpy as np
 
 tf.enable_eager_execution()
 
-mididata = MidiData('midis/tracks.csv', open_files=['midis/smile.mid'], smoothing=16, transpose=[-4,-2,0,2,4])
+embedding_size = 512
+batch_size = 16
+rnn_units = 1024
 
-dataset = mididata.get_instr_batched_dataset(sequence_length=100, batch_size=64)
+mididata = MidiData('midis/tracks.csv', open_files=['midis/smile.mid'], smoothing=32, transpose=[-4,-3,-1,-2,0,1,2,3,4,5,6,7])
+
+trainds, devds, testds = mididata.get_instr_batched_dataset(sequence_length=60, batch_size=batch_size, ratio=[0.6,0.2])
 
 def build_model(input_size, output_size, embedding_dim, rnn_units, batch_size):
   model = tf.keras.Sequential([
     tf.keras.layers.Embedding(input_size, embedding_dim, batch_input_shape=[batch_size,None]),
+    tf.keras.layers.LSTM(rnn_units,
+                        return_sequences=True,
+                        stateful=True,
+                        recurrent_initializer='glorot_uniform'),
+    layers.BatchNormalization(),
     tf.keras.layers.LSTM(rnn_units,
                         return_sequences=True,
                         stateful=True,
@@ -24,18 +34,18 @@ def build_model(input_size, output_size, embedding_dim, rnn_units, batch_size):
   ])
   return model
 
-# Call the 'build_model' function and store the output in 'model'
-model = build_model(mididata.get_vocabs_sizes()[1], mididata.get_vocabs_sizes()[1], 512, 1024, 64)
+model = build_model(mididata.get_vocabs_sizes()[1], mididata.get_vocabs_sizes()[1], embedding_size, rnn_units, batch_size)
 
-# Define a loss function.
 def loss(labels, logits):
     return tf.keras.losses.sparse_categorical_crossentropy(labels, logits, from_logits=True)
 
-# Put everything together and tell the model to compile with the chosen loss.
-model.compile(optimizer='adam', loss=loss)
+def chopinScore(labels, logits):
+  return tf.py_function(mididata.chopin, [labels, logits], tf.float64)
+
+model.compile(optimizer='adam', loss=loss, metrics=[chopinScore])
 
 checkpoint_dir = './training_checkpoints'
-checkpoint_prefix = os.path.join(checkpoint_dir, 'ckpt_{epoch}')
+checkpoint_prefix = os.path.join(checkpoint_dir, 'ckpt_1')
 checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
     filepath=checkpoint_prefix,
     save_weights_only=True
@@ -43,44 +53,40 @@ checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
 
 model.summary()
 
-history = model.fit(dataset, epochs=10, callbacks=[checkpoint_callback])
+history = model.fit(trainds, epochs=200, callbacks=[checkpoint_callback], validation_data=devds)
 
-model = build_model(mididata.get_vocabs_sizes()[1], mididata.get_vocabs_sizes()[1], 512, 1024, 1)
+plt.plot(history.history['loss'])
+plt.plot(history.history['val_loss'])
+plt.title('Loss')
+plt.xlabel('epochs')
+plt.ylabel('loss')
+plt.show()
+plt.plot(history.history['chopinScore'])
+plt.plot(history.history['val_chopinScore'])
+plt.title('Chopin Score')
+plt.xlabel('epochs')
+plt.ylabel('Chopin Score')
+plt.show()
+
+model = build_model(mididata.get_vocabs_sizes()[1], mididata.get_vocabs_sizes()[1], embedding_size, rnn_units, 1)
 model.load_weights(tf.train.latest_checkpoint(checkpoint_dir))
 model.build(tf.TensorShape([1, None]))
 
-def generate_text(model, starting_instr):
-    # Number of characters we want to generate
+def generate_style(model, starting_instr):
     num_generate = 900
-    # Turning the input string into its integer representation (because the model only understands
-    # integer inputs)
     input_eval = tf.expand_dims(starting_instr, 0)
     generated_instr = []
-    temperature = 1.0
+    #denominator = 1.0
     model.reset_states()
   
     for i in range(num_generate):
         predictions = model(input_eval)
         predictions = tf.squeeze(predictions, 0)
-
-        # [0,1,2,3,4]
-        # [2.8888, -9.8, 0.8, 0]
-
-        # Pick one character by sampling one value over the distribution that was returned (Note that it's
-        # not actually a character but rather its integer representation, aka its index)
-        # predictions = predictions / temperature
         predicted_id = tf.random.categorical(predictions, num_samples=1)[-1,0].numpy()
-
-        # Add the predicted id to the input for the next prediction
         input_eval = tf.expand_dims([predicted_id], 0)
-
-        # Find the character corresponding to the predicted id and add it to 'text_generated'
         generated_instr.append(predicted_id)
-    
-    # Once the for is done, return the generated text
+
     print(len(generated_instr))
     mididata.export_model_output_to_midi(generated_instr, 'generated.mid')
-    # return (starting_instr + ''.join(ge))
 
-# This actually calls the method above and prints the output
-generate_text(model, starting_instr=[0])
+generate_style(model, starting_instr=[0])
